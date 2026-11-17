@@ -1,0 +1,7 @@
+package com.yukuai.score;
+import org.json.*;import org.junit.Test;import static org.junit.Assert.*;
+public class SyncSnapshotTest {
+ private JSONObject state() throws Exception{return new JSONObject("{\"type\":\"state\",\"protocol\":2,\"session\":\"match\",\"revision\":7,\"controller\":\"watch\",\"controlEpoch\":0,\"sport\":\"badminton\",\"red\":12,\"blue\":8,\"records\":[]}");}
+ @Test public void validatesProtocolScoreAndController() throws Exception{JSONObject s=state();assertTrue(SyncSnapshot.valid(s));s.put("red",-1);assertFalse(SyncSnapshot.valid(s));s.put("red",1.5);assertFalse(SyncSnapshot.valid(s));s.put("red",3);s.put("controller","unknown");assertFalse(SyncSnapshot.valid(s));s.put("controller","phone");s.put("protocol",1);assertFalse(SyncSnapshot.valid(s));}
+ @Test public void replayReplacesHistoryAndRetainsPreferences() throws Exception{JSONObject s=state();s.put("reversed",true);s.put("redName","甲");s.put("records",new JSONArray("[{\"id\":\"one\",\"game\":\"乒乓球\",\"score\":\"11 : 9\",\"timestamp\":1234} ]"));Match m=new Match();m.keepScreen=false;SyncSnapshot.apply(m,s);SyncSnapshot.apply(m,s);assertEquals(12,m.red);assertEquals(8,m.blue);assertTrue(m.reversed);assertFalse(m.keepScreen);assertEquals("甲",m.redName);assertEquals(1,m.history.length());assertEquals("one",m.history.getJSONObject(0).getString("id"));assertEquals("tabletennis",m.history.getJSONObject(0).getString("sport"));assertEquals(11,m.history.getJSONObject(0).getInt("red"));}
+}
