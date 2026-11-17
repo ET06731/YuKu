@@ -1,0 +1,201 @@
+<template>
+  <div class="root">
+    <swiper class="pager" index="{{ pageIndex }}" loop="false" indicator="true" enableswipe="{{ !confirming }}" onchange="pageChanged" onswipestart="swipeStarted">
+      <div class="panel settings">
+        <text class="heading">比赛设置</text>
+
+        <text class="choice" style="background-color: {{ gameType === 'badminton' ? '#137fdd' : '#252b32' }};" onclick="chooseBadminton">羽毛球</text>
+        <text class="choice" style="background-color: {{ gameType === 'tabletennis' ? '#137fdd' : '#252b32' }};" onclick="chooseTableTennis">乒乓球</text>
+      </div>
+      <div class="score-page">
+        <div class="team red" onclick="tapRed">
+          <text class="team-name">红方</text>
+          <text class="score">{{ scoreA }}</text>
+          <text class="winner" if="{{ winner === 'A' }}">获胜</text>
+        </div>
+        <div class="team blue" onclick="tapBlue">
+          <text class="team-name">蓝方</text>
+          <text class="score">{{ scoreB }}</text>
+          <text class="winner" if="{{ winner === 'B' }}">获胜</text>
+        </div>
+      </div>
+      <div class="panel actions">
+        <text class="heading">比赛操作</text>
+        <text class="reset-button" style="background-color: {{ resetColor }};" ontouchstart="startReset" ontouchend="stopReset" ontouchmove="moveReset">{{ resetLabel }}</text>
+        <text class="history-title">历史</text>
+        <text class="empty" if="{{ records.length === 0 }}">暂无记录</text>
+        <list class="history-list" if="{{ records.length > 0 }}">
+          <list-item class="history-item" type="record" for="{{ records }}">
+            <div class="history-row">
+              <text class="history-game">{{ $item.game }}</text>
+              <text class="history-score">{{ $item.score }}</text>
+              <text class="history-result">{{ $item.result }}</text>
+            </div>
+          </list-item>
+        </list>
+      </div>
+    </swiper>
+    <div class="overlay" if="{{ confirming }}">
+      <div class="dialog">
+        <text class="dialog-title">{{ confirmText }}</text>
+        <div class="dialog-buttons">
+          <text class="dialog-button" onclick="cancelConfirm">取消</text>
+          <text class="dialog-button confirm" onclick="confirmAction">确认</text>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+let clickTimer = null
+let pendingSide = ''
+let resetTimer = null
+let resetTick = null
+let resetX = 0
+let resetY = 0
+const DOUBLE_MS = 300
+export default {
+  private: {
+    gameType: 'badminton', gameName: '羽毛球', scoreA: 0, scoreB: 0,
+    winner: '', undoStack: [], records: [], pageIndex: 1,
+    confirming: false, confirmText: '', requestedAction: '', resetLabel: '重置', resetColor: '#e52d35'
+  },
+  getWinner(a, b) {
+    if (this.gameType === 'badminton' && (a === 30 || b === 30)) return a === 30 ? 'A' : 'B'
+    const target = this.gameType === 'badminton' ? 21 : 11
+    if (a >= target && a - b >= 2) return 'A'
+    if (b >= target && b - a >= 2) return 'B'
+    return ''
+  },
+  changeScore(side, delta) {
+    const value = side === 'A' ? this.scoreA : this.scoreB
+    if ((delta > 0 && this.winner) || (delta < 0 && value === 0)) return
+    const stack = this.undoStack.slice()
+    stack.push({ a: this.scoreA, b: this.scoreB })
+    this.undoStack = stack
+    if (side === 'A') this.scoreA += delta
+    else this.scoreB += delta
+    this.winner = this.getWinner(this.scoreA, this.scoreB)
+  },
+  tapScore(side) {
+    if (this.confirming) return
+    if (clickTimer && pendingSide === side) {
+      clearTimeout(clickTimer); clickTimer = null; pendingSide = ''
+      this.changeScore(side, -1)
+      return
+    }
+    if (clickTimer) {
+      clearTimeout(clickTimer)
+      this.changeScore(pendingSide, 1)
+    }
+    pendingSide = side
+    clickTimer = setTimeout(() => {
+      const selected = pendingSide
+      clickTimer = null; pendingSide = ''
+      this.changeScore(selected, 1)
+    }, DOUBLE_MS)
+  },
+  tapRed() { this.tapScore('A') },
+  tapBlue() { this.tapScore('B') },
+  cancelPending() {
+    if (clickTimer) clearTimeout(clickTimer)
+    clickTimer = null; pendingSide = ''
+  },
+  swipeStarted() { this.cancelPending(); this.stopReset() },
+  pageChanged(e) { this.cancelPending(); this.stopReset(); this.pageIndex = e.index },
+  onHide() { this.cancelPending(); this.stopReset() },
+  onDestroy() { this.cancelPending(); this.stopReset() },
+  undo() {
+    if (!this.undoStack.length || this.confirming) return
+    const stack = this.undoStack.slice()
+    const previous = stack.pop()
+    this.undoStack = stack; this.scoreA = previous.a; this.scoreB = previous.b
+    this.winner = this.getWinner(this.scoreA, this.scoreB)
+  },
+  archiveAndReset() {
+    if (this.winner) {
+      const records = this.records.slice()
+      records.unshift({ game: this.gameName, score: this.scoreA + ' : ' + this.scoreB, result: this.winner === 'A' ? '红方胜' : '蓝方胜' })
+      this.records = records
+    }
+    this.scoreA = 0; this.scoreB = 0; this.winner = ''; this.undoStack = []
+  },
+  chooseBadminton() { this.chooseGame('badminton') },
+  chooseTableTennis() { this.chooseGame('tabletennis') },
+  chooseGame(type) {
+    if (type === this.gameType || this.confirming) return
+    if (this.scoreA || this.scoreB) {
+      this.confirming = true; this.requestedAction = type; this.confirmText = '切换比赛？'
+    } else this.setGame(type)
+  },
+  setGame(type) {
+    this.gameType = type
+    this.gameName = type === 'badminton' ? '羽毛球' : '乒乓球'
+  },
+  startReset(e) {
+    if (this.confirming || resetTimer) return
+    const point = e.touches && e.touches[0]
+    resetX = point ? point.clientX : 0; resetY = point ? point.clientY : 0
+    this.resetLabel = '2'; this.resetColor = '#b62029'
+    resetTick = setTimeout(() => { this.resetLabel = '1'; this.resetColor = '#ff555c' }, 1000)
+    resetTimer = setTimeout(() => {
+      resetTimer = null; resetTick = null
+      this.archiveAndReset()
+      this.resetLabel = '完成'; this.resetColor = '#92212a'
+    }, 2000)
+  },
+  moveReset(e) {
+    const point = e.touches && e.touches[0]
+    if (point && (Math.abs(point.clientX - resetX) > 12 || Math.abs(point.clientY - resetY) > 12)) this.stopReset()
+  },
+  stopReset() {
+    if (resetTimer) clearTimeout(resetTimer)
+    if (resetTick) clearTimeout(resetTick)
+    resetTimer = null; resetTick = null
+    this.resetLabel = '重置'; this.resetColor = '#e52d35'
+  },
+  cancelConfirm() { this.confirming = false; this.requestedAction = '' },
+  confirmAction() {
+    const action = this.requestedAction
+    this.cancelPending(); this.archiveAndReset()
+    if (action !== 'reset') this.setGame(action)
+    this.cancelConfirm()
+  }
+}
+</script>
+
+<style>
+.root { width: 100%; height: 100%; background-color: #111316; }
+.pager { width: 100%; height: 100%; indicator-size: 4px; indicator-color: #b2b7bd; indicator-selected-color: #ffffff; indicator-bottom: 5px; }
+.panel { width: 100%; height: 100%; flex-direction: column; align-items: center; background-color: #111316; padding-top: 20px; padding-left: 14px; padding-right: 14px; }
+.heading { color: #ffffff; font-size: 18px; font-weight: bold; margin-bottom: 10px; }
+.current { color: #aeb6c0; font-size: 14px; margin-bottom: 10px; }
+.choice { width: 150px; height: 45px; color: #ffffff; font-size: 17px; text-align: center; background-color: #252b32; border-radius: 10px; margin-bottom: 10px; }
+.score-page { width: 100%; height: 100%; flex-direction: column; }
+.team { width: 100%; flex: 1; flex-direction: column; align-items: center; justify-content: center; }
+.red { background-color: #ef282d; }
+.blue { background-color: #168de1; }
+.team-name { color: #ffffff; font-size: 14px; }
+.score { color: #ffffff; font-size: 64px; font-weight: bold; text-align: center; }
+.winner { color: #ffffff; font-size: 14px; font-weight: bold; }
+.reset-button { width: 54px; height: 54px; border-radius: 27px; text-align: center; color: #ffffff; font-size: 14px; font-weight: bold; }
+.button { width: 76px; height: 37px; text-align: center; font-size: 15px; color: #ffffff; background-color: #303741; border-radius: 8px; }
+.history-title { width: 100%; font-size: 15px; font-weight: bold; color: #ffffff; margin-top: 13px; margin-bottom: 5px; }
+.empty { color: #afb6bf; font-size: 14px; margin-top: 12px; }
+.history-list { width: 100%; flex: 1; margin-bottom: 20px; }
+.history-item { height: 55px; background-color: #252b32; border-radius: 7px; margin-bottom: 4px; }
+.history-row { width: 100%; flex-direction: row; align-items: center; justify-content: space-around; }
+.history-game { color: #c5cbd3; font-size: 10px; }
+.history-score { color: #ffffff; font-size: 15px; font-weight: bold; }
+.history-result { color: #ffffff; font-size: 10px; }
+.overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background-color: #b3000000; justify-content: center; align-items: center; }
+.dialog { width: 164px; background-color: #303741; border-radius: 12px; flex-direction: column; align-items: center; padding: 14px; }
+.dialog-title { color: #ffffff; font-size: 17px; font-weight: bold; margin-bottom: 16px; }
+.dialog-buttons { width: 100%; flex-direction: row; justify-content: space-between; }
+.dialog-button { width: 62px; height: 36px; color: #ffffff; text-align: center; font-size: 15px; border-radius: 8px; background-color: #505965; }
+.confirm { background-color: #1d91e5; }
+</style>
+
+
+

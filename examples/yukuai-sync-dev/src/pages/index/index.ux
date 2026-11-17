@@ -1,0 +1,414 @@
+<template>
+  <div class="root">
+    <swiper class="pager" if="{{ !historyOpen }}" index="{{ pageIndex }}" loop="false" indicator="true" enableswipe="{{ !confirming }}" onchange="pageChanged" onswipestart="swipeStarted">
+      <div class="panel settings" onswipe="handleSettingsSwipe" ontouchstart="startExitGesture" ontouchmove="moveExitGesture" ontouchend="endExitGesture">
+        <text class="heading">比赛设置</text>
+
+        <text class="choice" style="background-color: {{ gameType === 'badminton' ? '#285f3b' : '#252b32' }}; border-color: {{ gameType === 'badminton' ? '#99efa7' : '#3b4540' }};" onclick="chooseBadminton">羽毛球</text>
+        <text class="choice" style="background-color: {{ gameType === 'tabletennis' ? '#285f3b' : '#252b32' }}; border-color: {{ gameType === 'tabletennis' ? '#99efa7' : '#3b4540' }};" onclick="chooseTableTennis">乒乓球</text>
+        <text class="choice keep-screen-choice" style="background-color: {{ keepScoreOn ? '#285f3b' : '#252b32' }}; border-color: {{ keepScoreOn ? '#99efa7' : '#3b4540' }};" onclick="toggleScoreKeepScreen">{{ keepScreenStatus || ('比分常亮：' + (keepScoreOn ? '开' : '关')) }}</text>
+        <text class="choice controller-choice" style="background-color: {{ controller === 'phone' ? '#285f3b' : '#252b32' }}; border-color: {{ controller === 'phone' ? '#99efa7' : '#3b4540' }};" onclick="requestWatchControl">{{ controller === 'phone' ? '手机计分' : '手环计分' }}</text>
+      </div>
+      <div class="score-page" style="flex-direction: {{ reversed ? 'column-reverse' : 'column' }};">
+        <div class="team red" onclick="tapRed">
+          <text class="team-name">{{ redName }}</text>
+          <text class="score">{{ scoreA }}</text>
+          <text class="winner" if="{{ winner === 'A' }}">获胜</text>
+        </div>
+        <div class="team blue" onclick="tapBlue">
+          <text class="team-name">{{ blueName }}</text>
+          <text class="score">{{ scoreB }}</text>
+          <text class="winner" if="{{ winner === 'B' }}">获胜</text>
+        </div>
+      </div>
+      <div class="panel actions" onswipe="handleActionsSwipe" ontouchstart="startActionsGesture" ontouchend="endActionsGesture">
+        <div class="reset-area">
+          <div class="reset-control" ontouchstart="startReset" ontouchend="stopReset" ontouchmove="moveReset">
+            <progress class="reset-progress" type="arc" percent="{{ resetProgress }}"></progress>
+            <div class="reset-face" style="background-color: {{ resetColor }};">
+              <text class="reset-label">{{ resetLabel }}</text>
+            </div>
+          </div>
+        </div>
+        <image class="history-arrow" src="/common/chevron-up.png" onclick="openHistory"></image>
+        <text class="history-entry" onclick="openHistory">历史记录</text>
+      </div>
+    </swiper>
+    <div class="history-page" if="{{ historyOpen }}" onswipe="handleHistorySwipe">
+      <div class="history-header">
+        <text class="history-back" onclick="closeHistory">‹</text>
+        <text class="history-heading">历史记录</text>
+      </div>
+      <text class="empty" if="{{ records.length === 0 }}">暂无记录</text>
+      <list class="history-list" if="{{ records.length > 0 }}">
+        <list-item class="history-item" type="record" for="{{ records }}">
+          <div class="history-row">
+            <div class="history-meta">
+              <text class="history-game">{{ $item.game }}</text>
+              <text class="history-date">{{ $item.dateLabel }}</text>
+            </div>
+            <text class="history-score">{{ $item.score }}</text>
+          </div>
+        </list-item>
+      </list>
+    </div>
+    <div class="overlay" if="{{ confirming }}">
+      <div class="dialog">
+        <text class="dialog-title">{{ confirmText }}</text>
+        <div class="dialog-buttons">
+          <text class="dialog-button" onclick="cancelConfirm">取消</text>
+          <text class="dialog-button confirm" onclick="confirmAction">确认</text>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+import interconnect from '@system.interconnect'
+import storage from '@system.storage'
+import brightness from '@system.brightness'
+let conn = null
+let storageBusy = false
+let pendingSave = null
+let storageReady = false
+let clickTimer = null
+let pendingSide = ''
+let resetTimer = null
+let resetTick = null
+let resetX = 0
+let resetY = 0
+let resetStartedAt = 0
+let actionsX = 0
+let actionsY = 0
+let actionsGestureActive = false
+const DOUBLE_MS = 300
+export default {
+  private: {
+    gameType: 'badminton', gameName: '羽毛球', scoreA: 0, scoreB: 0,
+    winner: '', undoStack: [], records: [], pageIndex: 1,
+    confirming: false, confirmText: '', requestedAction: '', resetLabel: '长按重置', resetColor: '#262d29', resetProgress: 0, historyOpen: false, syncRevision: 0, syncSession: '', syncReady: false, exitRequested: false, exitStartX: -1, exitStartY: -1, exitLastX: -1, exitLastY: -1, exitGestureActive: false, exitGestureMoved: false, controller: 'watch', controlEpoch: 0, redName: '红方', blueName: '蓝方', reversed: false, commandResults: [], controlRequestId: '', keepScoreOn: false, pageVisible: false, keepScreenSaving: false, keepScreenReady: false, keepScreenStatus: '', keepScreenRequest: 0
+  },
+  exitApp() {
+    if (this.exitRequested) return
+    this.cancelPending(); this.stopReset()
+    this.exitRequested = true
+    this.applyScoreKeepScreen()
+    console.info('[navigation] exit requested')
+    try { this.$app.exit() } catch (e) {
+      this.exitRequested = false
+      this.applyScoreKeepScreen()
+      console.error('[navigation] exit failed: ' + e)
+    }
+  },
+  handleSettingsSwipe(e) {
+    if (!this.confirming && this.pageIndex === 0 && e && e.direction === 'right') this.exitApp()
+  },
+  startExitGesture(e) {
+    this.exitGestureActive = false; this.exitGestureMoved = false
+    if (this.pageIndex !== 0 || this.confirming) return
+    const point = e.touches && e.touches[0]
+    if (point) {
+      this.exitStartX = this.exitLastX = point.clientX
+      this.exitStartY = this.exitLastY = point.clientY
+      this.exitGestureActive = true
+    }
+  },
+  moveExitGesture(e) {
+    if (!this.exitGestureActive) return
+    const point = e.touches && e.touches[0]
+    if (!point) return
+    this.exitLastX = point.clientX; this.exitLastY = point.clientY
+    if (Math.abs(point.clientX - this.exitStartX) > 12 || Math.abs(point.clientY - this.exitStartY) > 12) this.exitGestureMoved = true
+  },
+  endExitGesture(e) {
+    if (!this.exitGestureActive) return
+    this.exitGestureActive = false
+    if (this.confirming) return
+    const point = (e.changedTouches && e.changedTouches[0]) || (e.touches && e.touches[0])
+    const dx = (point ? point.clientX : this.exitLastX) - this.exitStartX
+    const dy = Math.abs((point ? point.clientY : this.exitLastY) - this.exitStartY)
+    this.exitStartX = -1; this.exitStartY = -1
+    if (dx >= 48 && dx > dy * 1.3) this.exitApp()
+  },
+  onBackPress() {
+    this.cancelPending(); this.stopReset()
+    this.exitGestureActive = false
+    if (this.historyOpen) this.closeHistory()
+    else if (this.confirming) this.cancelConfirm()
+    else if (this.pageIndex > 0) { this.pageIndex -= 1; this.applyScoreKeepScreen() }
+    else this.exitApp()
+    return true
+  },
+  onShow() { this.exitRequested = false; this.pageVisible = true; this.applyScoreKeepScreen() },
+  toggleScoreKeepScreen() {
+    if (!this.keepScreenReady || this.confirming || this.exitGestureMoved || this.keepScreenSaving) return
+    const previous = this.keepScoreOn
+    this.keepScoreOn = !previous; this.keepScreenSaving = true; this.keepScreenStatus = ''
+    this.applyScoreKeepScreen()
+    storage.set({key:'yukuai_keep_score_on', value:JSON.stringify(this.keepScoreOn),
+      success:() => { this.keepScreenSaving=false },
+      fail:() => { this.keepScreenSaving=false; this.keepScoreOn=previous; this.keepScreenStatus='设置未保存'; this.applyScoreKeepScreen() }
+    })
+  },
+  applyScoreKeepScreen() {
+    const keep = !!(this.keepScoreOn && this.pageVisible && this.pageIndex === 1 && !this.historyOpen && !this.exitRequested)
+    const request = ++this.keepScreenRequest
+    try {
+      brightness.setKeepScreenOn({keepScreenOn:keep,
+        success:() => { if (request === this.keepScreenRequest) { if(this.keepScreenStatus === '常亮暂不可用') this.keepScreenStatus=''; console.info('[screen] keep score on: ' + keep) } },
+        fail:() => { if (request === this.keepScreenRequest && keep) this.keepScreenStatus='常亮暂不可用'; console.error('[screen] keep screen request failed') }
+      })
+    } catch (e) { if (keep) this.keepScreenStatus='常亮暂不可用'; console.error('[screen] keep screen API unavailable') }
+  },
+  onInit() {
+    storage.get({key:'yukuai_keep_score_on', success:(value) => { this.keepScoreOn=value === 'true'; this.keepScreenReady=true; this.applyScoreKeepScreen() }, fail:() => { this.keepScreenReady=true } })
+    this.syncSession = Date.now().toString() + '-' + Math.floor(Math.random() * 1000000)
+    storage.get({key:'yukuai_sync_state', success: (value) => {
+      try { const state = JSON.parse(value); if (state && state.session) { this.syncSession=state.session; this.syncRevision=state.revision || 0; this.gameType=state.sport; this.gameName=state.sport === 'badminton' ? '羽毛球' : '乒乓球'; this.scoreA=state.red; this.scoreB=state.blue; this.winner=this.getWinner(this.scoreA,this.scoreB); this.controller=state.controller === 'phone' ? 'phone' : 'watch'; this.controlEpoch=state.controlEpoch || 0; this.commandResults=state.commandResults || []; this.redName=state.redName || '红方'; this.blueName=state.blueName || '蓝方'; this.reversed=!!state.reversed; this.records=(state.records || []).map(record => Object.assign({}, record, {dateLabel: record.dateLabel || this.formatRecordDate(record.timestamp)})) } } catch (e) {}
+      storageReady=true; this.syncReady=true; this.queueSave(false)
+    }, fail: () => { storageReady=true; this.syncReady=true; this.queueSave(false) }})
+    conn=interconnect.instance()
+    conn.onopen=() => { if (storageReady) this.sendSnapshot() }
+    conn.onmessage=(event) => { try { const msg=typeof event.data === 'string' ? JSON.parse(event.data) : event.data; this.receiveSync(msg) } catch (e) { console.error('[sync] invalid message') } }
+  },
+  snapshot() { return {type:'state', protocol:2, controller:this.controller, controlEpoch:this.controlEpoch, commandResults:this.commandResults, redName:this.redName, blueName:this.blueName, reversed:this.reversed, session:this.syncSession, revision:this.syncRevision, sport:this.gameType, red:this.scoreA, blue:this.scoreB, winner:this.winner, records:this.records} },
+  receiveSync(msg) {
+    if (!storageReady || !msg || msg.protocol !== 2) return
+    if (msg.type === 'hello') { this.flushSave(); this.sendSnapshot(); return }
+    if (msg.type !== 'command' || typeof msg.id !== 'string' || !msg.id || msg.id.length > 80) return
+    if (this.controlRequestId === msg.id) return
+    if (this.commandResults.some(result => result.id === msg.id)) { this.sendSnapshot(); return }
+    if (msg.session !== this.syncSession || msg.baseRevision !== this.syncRevision || msg.controlEpoch !== this.controlEpoch) { this.finishCommand(msg.id, 'stale'); return }
+    if (this.confirming || resetTimer || clickTimer) { this.finishCommand(msg.id, 'busy'); return }
+    if (msg.action === 'requestControl' && this.controller === 'watch') {
+      this.cancelPending(); this.stopReset(); this.confirming=true; this.requestedAction='control'; this.confirmText='交给手机计分？'; this.controlRequestId=msg.id; return
+    }
+    if (this.controller !== 'phone') { this.finishCommand(msg.id, 'denied'); return }
+    // Mutations and their id are persisted together before an acknowledgement is sent.
+    this.commandResults=this.commandResults.concat([{id:msg.id,status:'ok'}]).slice(-64)
+    if (msg.action === 'score' && (msg.side === 'A' || msg.side === 'B') && (msg.delta === 1 || msg.delta === -1)) this.changeScore(msg.side,msg.delta)
+    else if (msg.action === 'undo') this.undo()
+    else if (msg.action === 'reset') this.archiveAndReset()
+    else if (msg.action === 'sport' && (msg.sport === 'badminton' || msg.sport === 'tabletennis')) { this.archiveAndReset(); this.setGame(msg.sport) }
+    else if (msg.action === 'display' && typeof msg.reversed === 'boolean') { this.reversed=msg.reversed; this.queueSave(true) }
+    else if (msg.action === 'names' && typeof msg.redName === 'string' && typeof msg.blueName === 'string' && msg.redName.length <= 12 && msg.blueName.length <= 12) { this.redName=msg.redName || '红方'; this.blueName=msg.blueName || '蓝方'; this.queueSave(true) }
+    else if (msg.action === 'releaseControl') { this.controller='watch'; this.controlEpoch+=1; this.queueSave(true) }
+    else { this.commandResults.pop(); this.finishCommand(msg.id,'invalid'); return }
+    this.queueSave(false)
+  },
+  requestWatchControl() { if(this.controller !== 'phone' || this.confirming) return; this.confirming=true; this.requestedAction='reclaim'; this.confirmText='切回手环计分？' },
+  finishCommand(id,status) { this.commandResults=this.commandResults.concat([{id:id,status:status}]).slice(-64); this.queueSave(false) },
+  sendSnapshot() { if (conn && storageReady && !storageBusy && !pendingSave) conn.send({data:this.snapshot(), fail:()=>{}}) },
+  queueSave(changed) {
+    if (!storageReady) return
+    if (changed) this.syncRevision += 1
+    pendingSave=JSON.stringify(this.snapshot())
+    this.flushSave()
+  },
+  flushSave() {
+    if (storageBusy || !pendingSave) return
+    const data=pendingSave; pendingSave=null; storageBusy=true
+    storage.set({key:'yukuai_sync_state', value:data, success:()=>{ storageBusy=false; if (pendingSave) this.flushSave(); else this.sendSnapshot() }, fail:()=>{storageBusy=false; pendingSave=data} })
+  },  getWinner(a, b) {
+    if (this.gameType === 'badminton' && (a === 30 || b === 30)) return a === 30 ? 'A' : 'B'
+    const target = this.gameType === 'badminton' ? 21 : 11
+    if (a >= target && a - b >= 2) return 'A'
+    if (b >= target && b - a >= 2) return 'B'
+    return ''
+  },
+  changeScore(side, delta) {
+    const value = side === 'A' ? this.scoreA : this.scoreB
+    if ((delta > 0 && this.winner) || (delta < 0 && value === 0)) return
+    const stack = this.undoStack.slice()
+    stack.push({ a: this.scoreA, b: this.scoreB })
+    this.undoStack = stack
+    if (side === 'A') this.scoreA += delta
+    else this.scoreB += delta
+    this.winner = this.getWinner(this.scoreA, this.scoreB)
+    this.queueSave(true)
+  },
+  tapScore(side) {
+    if (this.confirming || !this.syncReady || this.controller !== 'watch') return
+    if (clickTimer && pendingSide === side) {
+      clearTimeout(clickTimer); clickTimer = null; pendingSide = ''
+      this.changeScore(side, -1)
+      return
+    }
+    if (clickTimer) {
+      clearTimeout(clickTimer)
+      this.changeScore(pendingSide, 1)
+    }
+    pendingSide = side
+    clickTimer = setTimeout(() => {
+      const selected = pendingSide
+      clickTimer = null; pendingSide = ''
+      this.changeScore(selected, 1)
+    }, DOUBLE_MS)
+  },
+  tapRed() { this.tapScore('A') },
+  tapBlue() { this.tapScore('B') },
+  cancelPending() {
+    if (clickTimer) clearTimeout(clickTimer)
+    clickTimer = null; pendingSide = ''
+  },
+  swipeStarted() { this.cancelPending(); this.stopReset() },
+  pageChanged(e) {
+    this.cancelPending(); this.stopReset()
+    const nextIndex = Number(e && e.index)
+    this.pageIndex = nextIndex
+    this.applyScoreKeepScreen()
+  },
+  onHide() { this.pageVisible=false; this.applyScoreKeepScreen(); this.cancelPending(); this.stopReset() },
+  onDestroy() { this.pageVisible=false; this.applyScoreKeepScreen(); this.cancelPending(); this.stopReset() },
+  undo() {
+    if (!this.undoStack.length || this.confirming) return
+    const stack = this.undoStack.slice()
+    const previous = stack.pop()
+    this.undoStack = stack; this.scoreA = previous.a; this.scoreB = previous.b
+    this.winner = this.getWinner(this.scoreA, this.scoreB)
+    this.queueSave(true)
+  },
+  archiveAndReset() {
+    if (this.winner) {
+      const records = this.records.slice()
+      const timestamp = Date.now()
+      records.unshift({ id: this.syncSession + ':' + this.syncRevision, redName: this.redName, blueName: this.blueName, game: this.gameName, score: this.scoreA + ' : ' + this.scoreB, result: this.winner === 'A' ? '红方胜' : '蓝方胜', timestamp: timestamp, dateLabel: this.formatRecordDate(timestamp) })
+      this.records = records
+    }
+    this.scoreA = 0; this.scoreB = 0; this.winner = ''; this.undoStack = []
+    this.queueSave(true)
+  },
+  chooseBadminton() { this.chooseGame('badminton') },
+  chooseTableTennis() { this.chooseGame('tabletennis') },
+  chooseGame(type) {
+    if (this.controller !== 'watch' || (this.pageIndex === 0 && this.exitGestureMoved)) return
+    if (type === this.gameType || this.confirming) return
+    if (this.scoreA || this.scoreB) {
+      this.confirming = true; this.requestedAction = type; this.confirmText = '切换比赛？'
+    } else this.setGame(type)
+  },
+  setGame(type) {
+    this.gameType = type
+    this.gameName = type === 'badminton' ? '羽毛球' : '乒乓球'
+    this.queueSave(true)
+  },
+  startReset(e) {
+    if (this.confirming || this.historyOpen || resetTimer) return
+    const point = e.touches && e.touches[0]
+    resetX = point ? point.clientX : 0; resetY = point ? point.clientY : 0
+    resetStartedAt = Date.now()
+    this.resetLabel = '长按重置'; this.resetColor = '#354b3c'; this.resetProgress = 0
+    const tick = () => {
+      this.resetProgress = Math.min(99, Math.floor((Date.now() - resetStartedAt) / 20))
+      resetTick = setTimeout(tick, 40)
+    }
+    resetTick = setTimeout(tick, 40)
+    resetTimer = setTimeout(() => {
+      if (resetTick) clearTimeout(resetTick)
+      resetTimer = null; resetTick = null
+      if (this.controller === 'phone') {
+        this.stopReset(); this.confirming=true; this.requestedAction='reclaimReset'; this.confirmText='切回手环并重置？'; return
+      }
+      this.archiveAndReset()
+      this.resetProgress = 100; this.resetLabel = '已重置'; this.resetColor = '#355b40'
+    }, 2000)
+  },
+  moveReset(e) {
+    const point = e.touches && e.touches[0]
+    if (point && (Math.abs(point.clientX - resetX) > 12 || Math.abs(point.clientY - resetY) > 12)) this.stopReset()
+  },
+  stopReset() {
+    if (resetTimer) clearTimeout(resetTimer)
+    if (resetTick) clearTimeout(resetTick)
+    resetTimer = null; resetTick = null
+    this.resetLabel = '长按重置'; this.resetColor = '#262d29'; this.resetProgress = 0
+  },
+  formatRecordDate(timestamp) {
+    if (!timestamp) return '—'
+    const date = new Date(timestamp)
+    if (isNaN(date.getTime())) return '—'
+    const pad = value => value < 10 ? '0' + value : '' + value
+    return pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes())
+  },
+  openHistory() {
+    if (this.confirming || this.historyOpen) return
+    this.cancelPending(); this.stopReset(); this.historyOpen = true
+    actionsGestureActive = false
+    this.applyScoreKeepScreen()
+  },
+  closeHistory() { this.historyOpen = false; this.pageIndex = 2; this.applyScoreKeepScreen() },
+  handleActionsSwipe(e) { if (e && e.direction === 'up') this.openHistory() },
+  handleHistorySwipe(e) { if (e && e.direction === 'right') this.closeHistory() },
+  startActionsGesture(e) {
+    const point = e.touches && e.touches[0]
+    actionsGestureActive = !!point && !this.confirming
+    if (point) { actionsX = point.clientX; actionsY = point.clientY }
+  },
+  endActionsGesture(e) {
+    if (!actionsGestureActive) return
+    actionsGestureActive = false
+    const point = e.changedTouches && e.changedTouches[0]
+    if (point && actionsY - point.clientY >= 40 && actionsY - point.clientY > Math.abs(actionsX - point.clientX) * 1.3) this.openHistory()
+  },
+  cancelConfirm() { if(this.controlRequestId) { this.finishCommand(this.controlRequestId,'cancelled'); this.controlRequestId='' } this.confirming = false; this.requestedAction = '' },
+  confirmAction() {
+    const action = this.requestedAction
+    if (action === 'reclaimReset') { this.cancelPending(); this.stopReset(); this.controller='watch'; this.controlEpoch+=1; this.cancelConfirm(); this.archiveAndReset(); this.resetProgress=100; this.resetLabel='已重置'; this.resetColor='#355b40'; return }
+    if (action === 'reclaim') { this.controller='watch'; this.controlEpoch+=1; this.cancelConfirm(); this.queueSave(true); return }
+    if (action === 'control') { const id=this.controlRequestId; this.controlRequestId=''; this.controller='phone'; this.controlEpoch+=1; this.commandResults=this.commandResults.concat([{id:id,status:'ok'}]).slice(-64); this.cancelConfirm(); this.queueSave(true); return }
+    this.cancelPending(); this.archiveAndReset()
+    if (action !== 'reset') this.setGame(action)
+    this.cancelConfirm()
+  }
+}
+</script>
+
+<style>
+.root { width: 100%; height: 100%; background-color: #111316; }
+.pager { width: 100%; height: 100%; indicator-size: 4px; indicator-color: #b2b7bd; indicator-selected-color: #ffffff; indicator-bottom: 5px; }
+.panel { width: 100%; height: 100%; flex-direction: column; align-items: center; background-color: #111316; padding-top: 20px; padding-left: 14px; padding-right: 14px; }
+.heading { color: #ffffff; font-size: 18px; font-weight: bold; margin-bottom: 10px; }
+.controller-choice { font-size: 16px; }
+.current { color: #aeb6c0; font-size: 14px; margin-bottom: 10px; }
+.choice { width: 150px; height: 45px; color: #ffffff; font-size: 17px; text-align: center; background-color: #252b32; border-radius: 10px; border-width: 1px; border-color: #3b4540; margin-bottom: 10px; }
+.keep-screen-choice { font-size: 16px; }
+.score-page { width: 100%; height: 100%; flex-direction: column; }
+.team { width: 100%; flex: 1; flex-direction: column; align-items: center; justify-content: center; }
+.red { background-color: #ef282d; }
+.blue { background-color: #168de1; }
+.team-name { color: #ffffff; font-size: 14px; }
+.score { color: #ffffff; font-size: 64px; font-weight: bold; text-align: center; }
+.winner { color: #ffffff; font-size: 14px; font-weight: bold; }
+.actions { background-color: #0c100d; }
+.reset-area { width: 100%; flex: 1; justify-content: center; align-items: center; }
+.reset-control { width: 132px; height: 132px; justify-content: center; align-items: center; }
+.reset-progress { position: absolute; left: 0; top: 0; width: 132px; height: 132px; center-x: 66px; center-y: 66px; radius: 61px; stroke-width: 5px; start-angle: 0deg; total-angle: 360deg; color: #99efa7; layer-color: #303932; }
+.reset-face { width: 108px; height: 108px; border-radius: 54px; justify-content: center; align-items: center; }
+.reset-label { color: #ffffff; font-size: 18px; font-weight: bold; text-align: center; }
+.button { width: 76px; height: 37px; text-align: center; font-size: 15px; color: #ffffff; background-color: #303741; border-radius: 8px; }
+.history-arrow { width: 24px; height: 12px; margin-bottom: 4px; }
+.history-entry { width: 150px; height: 36px; font-size: 16px; color: #c3d4c6; text-align: center; margin-bottom: 17px; }
+.history-page { width: 100%; height: 100%; background-color: #080c09; flex-direction: column; padding: 12px; }
+.history-header { width: 100%; height: 36px; flex-direction: row; align-items: center; margin-bottom: 8px; }
+.history-back { width: 30px; height: 36px; color: #ffffff; font-size: 30px; text-align: center; }
+.history-heading { color: #ffffff; font-size: 18px; font-weight: bold; }
+.empty { width: 100%; color: #afb6bf; font-size: 16px; margin-top: 45px; text-align: center; }
+.history-list { width: 100%; flex: 1; }
+.history-item { height: 61px; background-color: #18211b; border-radius: 13px; margin-bottom: 6px; }
+.history-row { width: 100%; height: 100%; padding: 10px; flex-direction: row; align-items: center; justify-content: space-between; }
+.history-meta { flex-direction: column; }
+.history-game { color: #f2f6f3; font-size: 15px; }
+.history-date { color: #acb9af; font-size: 11px; margin-top: 5px; }
+.history-score { color: #c0f3c6; font-size: 20px; font-weight: bold; text-align: right; }
+.overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background-color: #b3000000; justify-content: center; align-items: center; }
+.dialog { width: 164px; background-color: #303741; border-radius: 12px; flex-direction: column; align-items: center; padding: 14px; }
+.dialog-title { color: #ffffff; font-size: 17px; font-weight: bold; margin-bottom: 16px; }
+.dialog-buttons { width: 100%; flex-direction: row; justify-content: space-between; }
+.dialog-button { width: 62px; height: 36px; color: #ffffff; text-align: center; font-size: 15px; border-radius: 8px; background-color: #505965; }
+.confirm { background-color: #1d91e5; }
+</style>
+
+
+
+

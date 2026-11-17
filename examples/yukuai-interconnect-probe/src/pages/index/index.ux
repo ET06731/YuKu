@@ -1,0 +1,33 @@
+<template>
+  <div class="page">
+    <text class="title">同步测试</text>
+    <text class="state">{{ status }}</text>
+    <text class="button" onclick="sendProbe">发送测试</text>
+    <text class="button" onclick="exitTest">退出</text>
+  </div>
+</template>
+<script>
+import interconnect from '@system.interconnect'
+export default {
+  private: { status: '等待连接' },
+  onInit() {
+    this.conn = interconnect.instance()
+    this.conn.onopen = () => { this.status = '已连接' }
+    this.conn.onclose = () => { this.status = '已断开' }
+    this.conn.onerror = () => { this.status = '连接失败' }
+    this.conn.onmessage = (event) => { this.status = '收到手机消息'; this.conn.send({data: {type: 'probe_reply', value: event.data}}) }
+  },
+  exitTest() { this.$app.exit() },
+  onBackPress() { this.$app.exit(); return true },
+  sendProbe() {
+    this.conn.send({data: {type: 'probe', value: 'watch'}, success: () => {this.status = '已发送'}, fail: () => {this.status = '发送失败'}})
+  }
+}
+</script>
+<style>
+.page { width:100%; height:100%; background-color:#111111; align-items:center; justify-content:center; }
+.title { color:#ffffff; font-size:20px; }
+.state { color:#ffffff; font-size:16px; margin-top:12px; }
+.button { color:#ffffff; font-size:16px; margin-top:14px; padding:12px; background-color:#285daa; }
+</style>
+

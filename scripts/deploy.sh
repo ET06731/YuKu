@@ -62,7 +62,13 @@ if [ ! -f "$MANIFEST" ]; then
     echo "ERROR: No manifest.json found at $MANIFEST"
     exit 1
 fi
-PKG_NAME=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$MANIFEST')).package)")
+# Git Bash paths such as /d/Project are misread by Node on Windows as D:\\d\\Project.
+# Convert the manifest path to a native drive path before passing it to Node.
+MANIFEST_NODE_PATH="$MANIFEST"
+if command -v cygpath >/dev/null 2>&1; then
+    MANIFEST_NODE_PATH=$(cygpath -m "$MANIFEST")
+fi
+PKG_NAME=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$MANIFEST_NODE_PATH')).package)")
 RPK_FILENAME="$(echo "$PKG_NAME" | tr '.' '_').rpk"
 
 # --- Auto-detect phone serial ---
